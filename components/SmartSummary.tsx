@@ -53,44 +53,32 @@ export default function SmartSummary({ analysis, fullText }: Props) {
     setStreamText("");
     setErrorMsg("");
 
-    // Truncate to ~6000 words to stay within token limits
-    const textSnippet = fullText.slice(0, 24000);
+    // Truncate to avoid token overflow
+    const textSnippet = fullText.slice(0, 12000);
 
-    const prompt = `You are an expert document analyst. Analyse the following PDF document text and return a structured JSON summary that helps someone quickly understand what this document is about.
+    // Keep the prompt compact to avoid hitting maxOutputTokens mid-JSON
+    const prompt = `Analyse this PDF document and return a JSON object only. No markdown, no explanation, no backticks.
 
-Document filename: "${analysis.fileName}"
-Total pages: ${analysis.totalPages}
-Total words: ${analysis.totalWords}
-Top keywords: ${analysis.topWords.slice(0, 10).map((w) => w.word).join(", ")}
+File: ${analysis.fileName} | Pages: ${analysis.totalPages} | Words: ${analysis.totalWords}
+Keywords: ${analysis.topWords.slice(0, 8).map((w: any) => w.word).join(", ")}
 
-Document text (may be truncated):
-"""
+Text:
 ${textSnippet}
-"""
 
-Return ONLY valid JSON (no markdown, no backticks, no preamble) in this exact structure:
+Return this exact JSON structure with short, concise values (avoid long sentences):
 {
-  "tldr": "One sentence (max 25 words) capturing the absolute essence of this document.",
-  "overview": "2-3 sentence paragraph explaining what this document is, its purpose, and key context.",
-  "documentType": "One of: Research Paper, Report, Contract, Manual, Article, Book, Presentation, Invoice, Resume, Other",
-  "complexity": "One of: Beginner, Intermediate, Advanced, Technical",
-  "audience": "Who this document is written for (1 sentence)",
-  "keyPoints": [
-    "Most important insight or finding #1",
-    "Most important insight or finding #2",
-    "Most important insight or finding #3",
-    "Most important insight or finding #4",
-    "Most important insight or finding #5"
-  ],
+  "tldr": "single sentence max 20 words",
+  "overview": "two sentences max",
+  "documentType": "one of: Research Paper|Report|Contract|Manual|Article|Book|Presentation|Invoice|Resume|Other",
+  "complexity": "one of: Beginner|Intermediate|Advanced|Technical",
+  "audience": "one sentence",
+  "keyPoints": ["point 1", "point 2", "point 3", "point 4", "point 5"],
   "sections": [
-    { "title": "Section or theme name", "summary": "1-2 sentence summary of this section" },
-    { "title": "Section or theme name", "summary": "1-2 sentence summary of this section" },
-    { "title": "Section or theme name", "summary": "1-2 sentence summary of this section" }
+    {"title": "name", "summary": "one sentence"},
+    {"title": "name", "summary": "one sentence"},
+    {"title": "name", "summary": "one sentence"}
   ],
-  "actionItems": [
-    "Concrete takeaway or action item from this document",
-    "Another key takeaway"
-  ],
+  "actionItems": ["item 1", "item 2", "item 3"],
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
 }`;
 
@@ -98,11 +86,7 @@ Return ONLY valid JSON (no markdown, no backticks, no preamble) in this exact st
       const response = await fetch("/api/summarise", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-        }),
+        body: JSON.stringify({ prompt }),
       });
 
       if (!response.ok) {
@@ -111,11 +95,32 @@ Return ONLY valid JSON (no markdown, no backticks, no preamble) in this exact st
       }
 
       const data = await response.json();
-      const raw = data.content?.map((b: any) => b.text || "").join("") || "";
+      if (data.error) throw new Error(data.error);
+
+      const raw = data.text || "";
 
       // Strip any accidental markdown fences
-      const cleaned = raw.replace(/```json|```/g, "").trim();
-      const parsed: SummaryData = JSON.parse(cleaned);
+      const cleaned = raw
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
+
+      // Find the JSON object boundaries
+      const start = cleaned.indexOf("{");
+      const end = cleaned.lastIndexOf("}");
+      if (start === -1 || end === -1) {
+        throw new Error("Gemini did not return a valid JSON object. Please try again.");
+      }
+      const jsonStr = cleaned.slice(start, end + 1);
+
+      let parsed: SummaryData;
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch (parseErr: any) {
+        console.error("Raw Gemini output:", jsonStr.slice(0, 500));
+        throw new Error("Failed to parse Gemini JSON. The response may have been cut off. Try again.");
+      }
 
       setSummary(parsed);
       setStatus("done");
@@ -175,7 +180,7 @@ Return ONLY valid JSON (no markdown, no backticks, no preamble) in this exact st
           </button>
 
           <p className="mt-4 text-xs font-mono" style={{ color: "var(--text-muted)" }}>
-            Powered by Claude · {analysis.totalWords.toLocaleString()} words · ~{analysis.readingTimeMinutes} min read
+            Powered by Gemini 2.5 Flash · {analysis.totalWords.toLocaleString()} words · ~{analysis.readingTimeMinutes} min read
           </p>
         </div>
       )}
@@ -202,7 +207,7 @@ Return ONLY valid JSON (no markdown, no backticks, no preamble) in this exact st
             </div>
           </div>
           <p className="font-display" style={{ fontSize: "1.2rem", color: "var(--text-primary)", fontWeight: 600 }}>
-            Claude is reading your document...
+            Gemini is reading your document...
           </p>
           <p className="mt-2 text-sm" style={{ color: "var(--text-muted)" }}>
             Extracting insights, key points & structure
